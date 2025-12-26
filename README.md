@@ -41,18 +41,25 @@ pip install bytegate[fastapi]
 The server accepts WebSocket connections and bridges them with Redis:
 
 ```python
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from redis import asyncio as aioredis
 
-from bytegate import router
+from bytegate.router import router
 
-app = FastAPI()
-app.include_router(router)
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     app.extra["redis"] = aioredis.from_url("redis://localhost")
     app.extra["server_id"] = "pod-1"  # Unique identifier for this server
+    try:
+        yield
+    finally:
+        await app.extra["redis"].close()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(router)
 ```
 
 Remote systems connect via WebSocket to `/bytegate/{connection_id}`.
