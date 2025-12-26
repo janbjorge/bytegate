@@ -1,4 +1,4 @@
-.PHONY: all lint format test mypy check build clean install dev
+.PHONY: all lint format test mypy check build clean clean-all install dev
 
 all: check test
 
@@ -43,11 +43,10 @@ check: lint mypy
 build:
 	python -m build
 
-# Clean build artifacts
+# Clean build artifacts (preserves .venv)
 clean:
 	rm -rf dist/
 	rm -rf build/
-	rm -rf .venv/
 	rm -rf .pytest_cache/
 	rm -rf .mypy_cache/
 	rm -rf .ruff_cache/
@@ -56,10 +55,14 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 
+# Clean everything including .venv
+clean-all: clean
+	rm -rf .venv/
+
 # Publish to PyPI (requires credentials)
 publish: clean build
-	twine upload dist/*
+	python -m twine upload dist/*
 
 # Publish to TestPyPI
 publish-test: clean build
-	twine upload --repository testpypi dist/*
+	python -m twine upload --repository testpypi dist/*

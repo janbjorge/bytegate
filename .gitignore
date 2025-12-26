@@ -75,3 +75,4 @@ dmypy.json
 
 # uv
 .uv_cache/
+bytegate/_version.py
