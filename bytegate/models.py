@@ -11,8 +11,18 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
-def _generate_request_id() -> str:
+def generate_request_id() -> str:
     return uuid4().hex
+
+
+def encode_payload(value: bytes) -> str:
+    return b64encode(value).decode("ascii")
+
+
+def decode_payload(value: str | bytes) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    return b64decode(value)
 
 
 class GatewayEnvelope(BaseModel):
@@ -25,22 +35,20 @@ class GatewayEnvelope(BaseModel):
     When serialized to JSON, payload bytes are base64-encoded.
     """
 
-    request_id: str = Field(default_factory=_generate_request_id)
+    request_id: str = Field(default_factory=generate_request_id)
     connection_id: str
     payload: bytes  # Opaque - the gateway does not inspect this
 
     @field_serializer("payload")
     def serialize_payload(self, value: bytes) -> str:
         """Encode bytes as base64 for JSON serialization."""
-        return b64encode(value).decode("ascii")
+        return encode_payload(value)
 
     @field_validator("payload", mode="before")
     @classmethod
     def deserialize_payload(cls, value: str | bytes) -> bytes:
         """Decode base64 string back to bytes during parsing."""
-        if isinstance(value, bytes):
-            return value
-        return b64decode(value)
+        return decode_payload(value)
 
 
 class GatewayResponse(BaseModel):
@@ -57,12 +65,10 @@ class GatewayResponse(BaseModel):
     @field_serializer("payload")
     def serialize_payload(self, value: bytes) -> str:
         """Encode bytes as base64 for JSON serialization."""
-        return b64encode(value).decode("ascii")
+        return encode_payload(value)
 
     @field_validator("payload", mode="before")
     @classmethod
     def deserialize_payload(cls, value: str | bytes) -> bytes:
         """Decode base64 string back to bytes during parsing."""
-        if isinstance(value, bytes):
-            return value
-        return b64decode(value)
+        return decode_payload(value)

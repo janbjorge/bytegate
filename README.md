@@ -8,7 +8,7 @@ A transparent Redis-backed WebSocket gateway that relays bytes between distribut
 
 ## What is bytegate?
 
-Bytegate is a **transparent transport layer** that connects WebSocket clients to your backend services through Redis pub/sub. It acts as a relay - it doesn't inspect, validate, or transform your data. It just moves bytes.
+Bytegate is a **transparent transport layer** that connects WebSocket clients to your backend services through Redis lists. It acts as a relay - it doesn't inspect, validate, or transform your data. It just moves bytes.
 
 ```
 ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
@@ -83,9 +83,9 @@ request_id = await client.send_no_wait("device-123", b"heartbeat")
 ### How It Works
 
 1. **Remote system connects** via WebSocket → Server registers `connection_id` in Redis
-2. **API sends message** → Client publishes to Redis channel `bytegate:{connection_id}:request`
-3. **Server receives** → Forwards payload bytes to WebSocket, waits for response
-4. **Response flows back** → Server publishes to Redis list `bytegate:response:{request_id}`
+2. **API sends message** → Client enqueues to Redis list `bytegate:{connection_id}:tx`
+3. **Server receives** → BRPOPLPUSHes, forwards payload bytes to WebSocket, waits for response
+4. **Response flows back** → Server enqueues to Redis list `bytegate:{connection_id}:rx`
 5. **API receives response** → Client returns the bytes to caller
 
 ### Key Design Decisions
@@ -94,8 +94,8 @@ request_id = await client.send_no_wait("device-123", b"heartbeat")
 |----------|-----------|
 | **Bytes-only payload** | You decide encoding. JSON? Protobuf? MessagePack? Your choice. |
 | **FIFO response matching** | Simple request-response pattern. One request, one response. |
-| **Redis pub/sub + lists** | Pub/sub for fan-out, lists for reliable response delivery. |
-| **Heartbeat registration** | Connections re-register every 10s. Stale entries auto-expire. |
+| **Redis lists** | Lists provide backpressure and reliable delivery with explicit acks. |
+| **Heartbeat registration** | Connections re-register every 10s to keep presence fresh. |
 
 ## API Reference
 
@@ -179,8 +179,9 @@ except BytegateError:
 | Key Pattern | Type | Purpose |
 |-------------|------|---------|
 | `bytegate:connections` | Hash | Maps `connection_id` → `server_id` |
-| `bytegate:{connection_id}:request` | Pub/Sub | Channel for incoming requests |
-| `bytegate:response:{request_id}` | List | Response queue (TTL: 60s) |
+| `bytegate:{connection_id}:tx` | List | Request queue (per connection) |
+| `bytegate:{connection_id}:tx:processing` | List | In-flight request queue (per connection) |
+| `bytegate:{connection_id}:rx` | List | Response queue (per connection) |
 
 ## Requirements
 

@@ -4,16 +4,12 @@ Tests for bytegate - Redis-backed WebSocket gateway.
 These tests verify the gateway's behavior as a transparent bytes transport layer.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from bytegate.client import (
-    CONNECTIONS_KEY,
-    DEFAULT_TIMEOUT_SECONDS,
-    REQUEST_CHANNEL_PATTERN,
-    GatewayClient,
-)
+from bytegate.client import GatewayClient
+from bytegate.config import BytegateConfig
 from bytegate.errors import BytegateError, ConnectionNotFound, GatewayTimeout
 from bytegate.models import GatewayEnvelope, GatewayResponse
 
@@ -155,7 +151,7 @@ class TestGatewayClient:
         """Create a mock Redis client."""
         redis = AsyncMock()
         redis.hexists = AsyncMock(return_value=True)
-        redis.publish = AsyncMock()
+        redis.lpush = AsyncMock()
         redis.blpop = AsyncMock()
         return redis
 
@@ -173,7 +169,8 @@ class TestGatewayClient:
         result = await client.is_connected("conn-1")
 
         assert result is True
-        mock_redis.hexists.assert_called_once_with(CONNECTIONS_KEY, "conn-1")
+        config = BytegateConfig()
+        mock_redis.hexists.assert_called_once_with(config.connections_hash, "conn-1")
 
     async def test_is_connected_returns_false(
         self, client: GatewayClient, mock_redis: AsyncMock
@@ -208,10 +205,10 @@ class TestGatewayClient:
 
         await client.send("conn-1", b'{"method": "ping"}')
 
-        mock_redis.publish.assert_called_once()
-        call_args = mock_redis.publish.call_args
-        channel = call_args[0][0]
-        assert channel == REQUEST_CHANNEL_PATTERN.format(connection_id="conn-1")
+        mock_redis.lpush.assert_called_once()
+        call_args = mock_redis.lpush.call_args
+        tx_list = call_args[0][0]
+        assert tx_list == BytegateConfig().tx_list("conn-1")
 
     async def test_send_waits_for_response(
         self, client: GatewayClient, mock_redis: AsyncMock
@@ -255,7 +252,7 @@ class TestGatewayClient:
         await client.send("conn-1", b"{}")
 
         call_args = mock_redis.blpop.call_args
-        assert call_args[1]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+        assert 0 < call_args[1]["timeout"] <= BytegateConfig().default_timeout_seconds
 
     async def test_send_with_bytes_payload(
         self, client: GatewayClient, mock_redis: AsyncMock
@@ -270,8 +267,8 @@ class TestGatewayClient:
         # Send binary data
         response = await client.send("conn-1", b"\xff\xfe\xfd")
 
-        # Verify the publish was called
-        mock_redis.publish.assert_called_once()
+        # Verify the enqueue was called
+        mock_redis.lpush.assert_called_once()
 
         # Verify response has bytes
         assert isinstance(response.payload, bytes)
@@ -306,7 +303,7 @@ class TestGatewayClient:
         request_id = await client.send_no_wait("conn-1", b"\x00\x01\x02\x03")
 
         assert request_id is not None
-        mock_redis.publish.assert_called_once()
+        mock_redis.lpush.assert_called_once()
 
 
 class TestBytesPayloadHandling:
@@ -365,23 +362,17 @@ class TestGatewayIntegration:
 
     @pytest.fixture
     def mock_redis_with_pubsub(self) -> tuple[AsyncMock, AsyncMock]:
-        """Create a mock Redis with pub/sub support for integration tests."""
+        """Create a mock Redis with list support for integration tests."""
         redis = AsyncMock()
         redis.hexists = AsyncMock(return_value=True)
         redis.hset = AsyncMock()
         redis.hdel = AsyncMock()
-        redis.publish = AsyncMock()
         redis.blpop = AsyncMock()
         redis.lpush = AsyncMock()
-        redis.expire = AsyncMock()
+        redis.brpoplpush = AsyncMock()
+        redis.lrem = AsyncMock()
 
-        pubsub = AsyncMock()
-        pubsub.subscribe = AsyncMock()
-        pubsub.unsubscribe = AsyncMock()
-        pubsub.close = AsyncMock()
-        redis.pubsub = MagicMock(return_value=pubsub)
-
-        return redis, pubsub
+        return redis, AsyncMock()
 
     async def test_envelope_roundtrip(self) -> None:
         """Envelope should survive JSON serialization roundtrip."""

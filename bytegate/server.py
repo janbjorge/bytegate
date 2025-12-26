@@ -1,7 +1,7 @@
 """
 Bytegate Server
 
-Manages WebSocket connections from remote systems and bridges them with Redis.
+Manages WebSocket connections from remote systems and bridges them with Redis lists.
 The server is completely content-agnostic - it just moves bytes.
 
 This module provides a standalone server for use outside of FastAPI.
@@ -11,58 +11,43 @@ For FastAPI integration, use the router module instead.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
     from websockets.asyncio.server import ServerConnection
 
+from bytegate.config import BytegateConfig
 from bytegate.models import GatewayEnvelope, GatewayResponse
 
 LOG = logging.getLogger(__name__)
 
-# Redis key patterns (must match client.py)
-CONNECTIONS_KEY = "bytegate:connections"
-REQUEST_CHANNEL_PATTERN = "bytegate:{connection_id}:request"
-RESPONSE_KEY_PATTERN = "bytegate:response:{request_id}"
-RESPONSE_KEY_TTL_SECONDS = 60
-HEARTBEAT_INTERVAL_SECONDS = 10
 
-
+@dataclass
 class GatewayServer:
     """
     Gateway server for bridging WebSocket connections with Redis.
 
     This class manages multiple WebSocket connections and handles the
-    Redis pub/sub communication for each.
+    Redis list communication for each.
 
     Usage:
         server = GatewayServer(redis, server_id="pod-1")
         await server.handle_connection(connection_id, websocket)
     """
 
-    def __init__(
-        self,
-        redis: "Redis",
-        server_id: str,
-        *,
-        on_connect: Callable[[str], Awaitable[None]] | None = None,
-        on_disconnect: Callable[[str], Awaitable[None]] | None = None,
-    ) -> None:
-        self._redis = redis
-        self._server_id = server_id
-        self._active_connections: set[str] = set()
-        self._on_connect = on_connect
-        self._on_disconnect = on_disconnect
-
-    @property
-    def server_id(self) -> str:
-        return self._server_id
+    redis: "Redis"
+    server_id: str
+    config: BytegateConfig = field(default_factory=BytegateConfig)
+    active_connections_set: set[str] = field(default_factory=set, init=False)
+    on_connect: Callable[[str], Awaitable[None]] | None = field(default=None, kw_only=True)
+    on_disconnect: Callable[[str], Awaitable[None]] | None = field(default=None, kw_only=True)
 
     @property
     def active_connections(self) -> list[str]:
         """List of currently active connection IDs."""
-        return list(self._active_connections)
+        return list(self.active_connections_set)
 
     async def handle_connection(
         self,
@@ -74,80 +59,80 @@ class GatewayServer:
 
         This method blocks until the connection closes.
         """
-        self._active_connections.add(connection_id)
+        self.active_connections_set.add(connection_id)
 
         try:
-            await self._register(connection_id)
+            await self.register(connection_id)
 
-            if self._on_connect:
-                await self._on_connect(connection_id)
+            if self.on_connect:
+                await self.on_connect(connection_id)
 
-            await self._run_connection(connection_id, websocket)
+            await self.run_connection(connection_id, websocket)
 
         finally:
-            await self._unregister(connection_id)
-            self._active_connections.discard(connection_id)
+            await self.unregister(connection_id)
+            self.active_connections_set.discard(connection_id)
 
-            if self._on_disconnect:
-                await self._on_disconnect(connection_id)
+            if self.on_disconnect:
+                await self.on_disconnect(connection_id)
 
-    async def _register(self, connection_id: str) -> None:
+    async def register(self, connection_id: str) -> None:
         """Register connection in Redis."""
-        await self._redis.hset(CONNECTIONS_KEY, connection_id, self._server_id)  # type: ignore[misc]
-        LOG.info("Registered connection %s on server %s", connection_id, self._server_id)
+        await self.redis.hset(self.config.connections_hash, connection_id, self.server_id)
+        LOG.info("Registered connection %s on server %s", connection_id, self.server_id)
 
-    async def _unregister(self, connection_id: str) -> None:
+    async def unregister(self, connection_id: str) -> None:
         """Remove connection from Redis."""
-        await self._redis.hdel(CONNECTIONS_KEY, connection_id)  # type: ignore[misc]
+        await self.redis.hdel(self.config.connections_hash, connection_id)
         LOG.info("Unregistered connection %s", connection_id)
 
-    async def _run_connection(
+    async def run_connection(
         self,
         connection_id: str,
         websocket: "ServerConnection",
     ) -> None:
-        """Main loop: bridge Redis pub/sub with WebSocket."""
+        """Main loop: bridge Redis lists with WebSocket."""
         pending_requests: dict[str, asyncio.Future[bytes]] = {}
 
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(self._heartbeat(connection_id))
-            tg.create_task(self._redis_to_websocket(connection_id, websocket, pending_requests))
-            tg.create_task(self._websocket_to_redis(websocket, pending_requests))
+            tg.create_task(self.heartbeat(connection_id))
+            tg.create_task(self.redis_to_websocket(connection_id, websocket, pending_requests))
+            tg.create_task(self.websocket_to_redis(websocket, pending_requests))
 
-    async def _heartbeat(self, connection_id: str) -> None:
+    async def heartbeat(self, connection_id: str) -> None:
         """Periodically refresh connection registration."""
         while True:
-            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-            await self._redis.hset(CONNECTIONS_KEY, connection_id, self._server_id)  # type: ignore[misc]
+            await asyncio.sleep(self.config.heartbeat_interval_seconds)
+            await self.redis.hset(self.config.connections_hash, connection_id, self.server_id)
 
-    async def _redis_to_websocket(
+    async def redis_to_websocket(
         self,
         connection_id: str,
         websocket: "ServerConnection",
         pending_requests: dict[str, asyncio.Future[bytes]],
     ) -> None:
-        """Subscribe to Redis and forward requests to WebSocket."""
-        channel_name = REQUEST_CHANNEL_PATTERN.format(connection_id=connection_id)
-        pubsub = self._redis.pubsub()
+        """Block on Redis list and forward requests to WebSocket."""
+        tx_list = self.config.tx_list(connection_id)
+        processing_list = self.config.tx_processing_list(connection_id)
 
-        try:
-            await pubsub.subscribe(channel_name)
-            LOG.debug("Subscribed to channel %s", channel_name)
+        while True:
+            data = await self.redis.brpoplpush(tx_list, processing_list, timeout=1)
+            if data is None:
+                continue
 
-            async for message in pubsub.listen():
-                if message["type"] != "message":
-                    continue
+            await self.handle_redis_message(
+                websocket,
+                data,
+                pending_requests,
+                processing_list,
+            )
 
-                await self._handle_redis_message(websocket, message["data"], pending_requests)
-        finally:
-            await pubsub.unsubscribe(channel_name)
-            await pubsub.close()
-
-    async def _handle_redis_message(
+    async def handle_redis_message(
         self,
         websocket: "ServerConnection",
         data: bytes | str,
         pending_requests: dict[str, asyncio.Future[bytes]],
+        processing_list: str,
     ) -> None:
         """Process a request from Redis, forward to WebSocket, wait for response."""
         try:
@@ -163,31 +148,36 @@ class GatewayServer:
             response_future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
             pending_requests[request_id] = response_future
 
-            # Forward payload to WebSocket (transparent - raw bytes)
-            await websocket.send(envelope.payload)
-
-            # Wait for response
             try:
-                response_payload = await asyncio.wait_for(response_future, timeout=30.0)
-                response = GatewayResponse(request_id=request_id, payload=response_payload)
-            except TimeoutError:
-                response = GatewayResponse(
-                    request_id=request_id,
-                    payload=b"",
-                    error="Timeout waiting for WebSocket response",
-                )
+                # Forward payload to WebSocket (transparent - raw bytes)
+                await websocket.send(envelope.payload)
+
+                # Wait for response
+                try:
+                    response_payload = await asyncio.wait_for(
+                        response_future,
+                        timeout=self.config.response_timeout_seconds,
+                    )
+                    response = GatewayResponse(request_id=request_id, payload=response_payload)
+                except TimeoutError:
+                    response = GatewayResponse(
+                        request_id=request_id,
+                        payload=b"",
+                        error="Timeout waiting for WebSocket response",
+                    )
             finally:
                 pending_requests.pop(request_id, None)
 
             # Publish response to Redis
-            response_key = RESPONSE_KEY_PATTERN.format(request_id=request_id)
-            await self._redis.lpush(response_key, response.model_dump_json())  # type: ignore[misc]
-            await self._redis.expire(response_key, RESPONSE_KEY_TTL_SECONDS)
+            rx_list = self.config.rx_list(envelope.connection_id)
+            await self.redis.lpush(rx_list, response.model_dump_json())
 
         except Exception:
             LOG.exception("Error handling Redis message")
+        finally:
+            await self.redis.lrem(processing_list, 1, data)
 
-    async def _websocket_to_redis(
+    async def websocket_to_redis(
         self,
         websocket: "ServerConnection",
         pending_requests: dict[str, asyncio.Future[bytes]],
@@ -204,7 +194,9 @@ class GatewayServer:
                 future = pending_requests.get(request_id)
                 if future and not future.done():
                     future.set_result(message)
+            else:
+                LOG.debug("Dropping unsolicited WebSocket message (%d bytes)", len(message))
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""
-        LOG.info("Shutting down bytegate server %s", self._server_id)
+        LOG.info("Shutting down bytegate server %s", self.server_id)

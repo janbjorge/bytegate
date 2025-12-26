@@ -18,18 +18,12 @@ from pydantic import ValidationError
 if TYPE_CHECKING:
     from redis.asyncio import Redis  # noqa: F401
 
+from bytegate.config import BytegateConfig
 from bytegate.models import GatewayEnvelope, GatewayResponse
 
 LOG = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bytegate", tags=["bytegate"])
-
-# Redis key patterns (must match client.py and server.py)
-CONNECTIONS_KEY = "bytegate:connections"
-REQUEST_CHANNEL_PATTERN = "bytegate:{connection_id}:request"
-RESPONSE_KEY_PATTERN = "bytegate:response:{request_id}"
-RESPONSE_KEY_TTL_SECONDS = 60
-HEARTBEAT_INTERVAL_SECONDS = 10
 
 
 @router.websocket("/{connection_id}")
@@ -46,10 +40,15 @@ async def bytegate_websocket(websocket: WebSocket, connection_id: str) -> None:
 
     redis: Redis = websocket.app.extra["redis"]
     server_id: str = websocket.app.extra.get("server_id", "unknown")
+    config = websocket.app.extra.get("bytegate_config")
+    if config is None:
+        config = BytegateConfig()
+    elif not isinstance(config, BytegateConfig):
+        config = BytegateConfig.model_validate(config)
 
     try:
-        async with _connection_lifecycle(redis, connection_id, server_id):
-            await _run_connection(websocket, redis, connection_id)
+        async with connection_lifecycle(redis, connection_id, server_id, config):
+            await run_connection(websocket, redis, connection_id, config)
     except WebSocketDisconnect:
         LOG.info("Bytegate connection disconnected: %s", connection_id)
     except Exception:
@@ -57,16 +56,17 @@ async def bytegate_websocket(websocket: WebSocket, connection_id: str) -> None:
 
 
 @asynccontextmanager
-async def _connection_lifecycle(
+async def connection_lifecycle(
     redis: "Redis",
     connection_id: str,
     server_id: str,
+    config: BytegateConfig,
 ) -> AsyncIterator[None]:
     """Register/unregister connection in Redis with heartbeat."""
-    await redis.hset(CONNECTIONS_KEY, connection_id, server_id)  # type: ignore[misc]
+    await redis.hset(config.connections_hash, connection_id, server_id)
     LOG.info("Registered connection %s on server %s", connection_id, server_id)
 
-    heartbeat_task = asyncio.create_task(_heartbeat(redis, connection_id, server_id))
+    heartbeat_task = asyncio.create_task(heartbeat(redis, connection_id, server_id, config))
 
     try:
         yield
@@ -75,63 +75,71 @@ async def _connection_lifecycle(
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
 
-        await redis.hdel(CONNECTIONS_KEY, connection_id)  # type: ignore[misc]
+        await redis.hdel(config.connections_hash, connection_id)
         LOG.info("Unregistered connection %s", connection_id)
 
 
-async def _heartbeat(
+async def heartbeat(
     redis: "Redis",
     connection_id: str,
     server_id: str,
+    config: BytegateConfig,
 ) -> None:
     """Periodically refresh connection registration."""
     while True:
-        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-        await redis.hset(CONNECTIONS_KEY, connection_id, server_id)  # type: ignore[misc]
+        await asyncio.sleep(config.heartbeat_interval_seconds)
+        await redis.hset(config.connections_hash, connection_id, server_id)
 
 
-async def _run_connection(
+async def run_connection(
     websocket: WebSocket,
     redis: "Redis",
     connection_id: str,
+    config: BytegateConfig,
 ) -> None:
-    """Main connection loop: bridge Redis pub/sub with WebSocket."""
+    """Main connection loop: bridge Redis lists with WebSocket."""
     pending_requests: dict[str, asyncio.Future[bytes]] = {}
 
     async with asyncio.TaskGroup() as tg:
-        tg.create_task(_redis_to_websocket(websocket, redis, connection_id, pending_requests))
-        tg.create_task(_websocket_to_redis(websocket, pending_requests))
+        tg.create_task(
+            redis_to_websocket(websocket, redis, connection_id, pending_requests, config)
+        )
+        tg.create_task(websocket_to_redis(websocket, pending_requests))
 
 
-async def _redis_to_websocket(
+async def redis_to_websocket(
     websocket: WebSocket,
     redis: "Redis",
     connection_id: str,
     pending_requests: dict[str, asyncio.Future[bytes]],
+    config: BytegateConfig,
 ) -> None:
-    """Subscribe to Redis and forward requests to WebSocket."""
-    channel_name = REQUEST_CHANNEL_PATTERN.format(connection_id=connection_id)
-    pubsub = redis.pubsub()
+    """Block on Redis list and forward requests to WebSocket."""
+    tx_list = config.tx_list(connection_id)
+    processing_list = config.tx_processing_list(connection_id)
 
-    try:
-        await pubsub.subscribe(channel_name)
-        LOG.debug("Subscribed to channel %s", channel_name)
+    while True:
+        data = await redis.brpoplpush(tx_list, processing_list, timeout=1)
+        if data is None:
+            continue
 
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
+        await handle_redis_message(
+            websocket,
+            redis,
+            data,
+            pending_requests,
+            processing_list,
+            config,
+        )
 
-            await _handle_redis_message(websocket, redis, message["data"], pending_requests)
-    finally:
-        await pubsub.unsubscribe(channel_name)
-        await pubsub.close()
 
-
-async def _handle_redis_message(
+async def handle_redis_message(
     websocket: WebSocket,
     redis: "Redis",
     data: bytes | str,
     pending_requests: dict[str, asyncio.Future[bytes]],
+    processing_list: str,
+    config: BytegateConfig,
 ) -> None:
     """Process a request from Redis, forward to WebSocket, wait for response."""
     try:
@@ -147,34 +155,39 @@ async def _handle_redis_message(
         response_future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
         pending_requests[request_id] = response_future
 
-        # Forward payload to WebSocket (transparent - raw bytes)
-        await websocket.send_bytes(envelope.payload)
-
-        # Wait for response
         try:
-            response_payload = await asyncio.wait_for(response_future, timeout=30.0)
-            response = GatewayResponse(request_id=request_id, payload=response_payload)
-        except TimeoutError:
-            response = GatewayResponse(
-                request_id=request_id,
-                payload=b"",
-                error="Timeout waiting for WebSocket response",
-            )
+            # Forward payload to WebSocket (transparent - raw bytes)
+            await websocket.send_bytes(envelope.payload)
+
+            # Wait for response
+            try:
+                response_payload = await asyncio.wait_for(
+                    response_future,
+                    timeout=config.response_timeout_seconds,
+                )
+                response = GatewayResponse(request_id=request_id, payload=response_payload)
+            except TimeoutError:
+                response = GatewayResponse(
+                    request_id=request_id,
+                    payload=b"",
+                    error="Timeout waiting for WebSocket response",
+                )
         finally:
             pending_requests.pop(request_id, None)
 
         # Publish response to Redis
-        response_key = RESPONSE_KEY_PATTERN.format(request_id=request_id)
-        await redis.lpush(response_key, response.model_dump_json())  # type: ignore[misc]
-        await redis.expire(response_key, RESPONSE_KEY_TTL_SECONDS)
+        rx_list = config.rx_list(envelope.connection_id)
+        await redis.lpush(rx_list, response.model_dump_json())
 
     except ValidationError:
         LOG.exception("Invalid message format from Redis")
     except Exception:
         LOG.exception("Error handling Redis message")
+    finally:
+        await redis.lrem(processing_list, 1, data)
 
 
-async def _websocket_to_redis(
+async def websocket_to_redis(
     websocket: WebSocket,
     pending_requests: dict[str, asyncio.Future[bytes]],
 ) -> None:
@@ -189,3 +202,5 @@ async def _websocket_to_redis(
             future = pending_requests.get(request_id)
             if future and not future.done():
                 future.set_result(message)
+        else:
+            LOG.debug("Dropping unsolicited WebSocket message (%d bytes)", len(message))

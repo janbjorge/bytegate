@@ -1,49 +1,32 @@
-.PHONY: all lint format test mypy check build clean clean-all install dev
+.PHONY: all install dev lint format fix mypy check test clean
 
 all: check test
 
-# Install dependencies
 install:
-	pip install -e .
+	uv pip install -e .
 
-# Install with dev dependencies
 dev:
-	pip install -e ".[dev]"
+	uv pip install -e ".[dev]"
 
-# Run all linters
 lint:
-	ruff check .
+	uv run ruff check .
 
-# Auto-fix linting issues
 fix:
-	ruff check . --fix
-	ruff format .
+	uv run ruff check . --fix
+	uv run ruff format .
 
-# Format code
 format:
-	ruff format .
+	uv run ruff format .
 
-# Type checking
 mypy:
-	mypy .
+	uv run mypy .
 
-# Run tests
 test:
-	pytest -v
+	uv run pytest -v
 
-# Run tests with coverage
-test-cov:
-	pytest --cov=bytegate --cov-report=term-missing
-
-# Run all checks (lint + mypy + format check)
 check: lint mypy
-	ruff format --check .
+	uv run ruff format --check .
 
-# Build package
-build:
-	python -m build
-
-# Clean build artifacts (preserves .venv)
 clean:
 	rm -rf dist/
 	rm -rf build/
@@ -54,15 +37,3 @@ clean:
 	rm -rf bytegate/_version.py
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
-
-# Clean everything including .venv
-clean-all: clean
-	rm -rf .venv/
-
-# Publish to PyPI (requires credentials)
-publish: clean build
-	python -m twine upload dist/*
-
-# Publish to TestPyPI
-publish-test: clean build
-	python -m twine upload --repository testpypi dist/*
