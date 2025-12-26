@@ -182,32 +182,6 @@ except BytegateError:
 | `bytegate:{connection_id}:request` | Pub/Sub | Channel for incoming requests |
 | `bytegate:response:{request_id}` | List | Response queue (TTL: 60s) |
 
-## Testing
-
-```python
-import pytest
-from unittest.mock import AsyncMock
-from bytegate import GatewayClient, GatewayResponse
-
-@pytest.fixture
-def mock_redis():
-    redis = AsyncMock()
-    redis.hexists.return_value = True
-    redis.blpop.return_value = (
-        b"key",
-        GatewayResponse(
-            request_id="test",
-            payload=b'{"result": "ok"}'
-        ).model_dump_json()
-    )
-    return redis
-
-async def test_send(mock_redis):
-    client = GatewayClient(mock_redis)
-    response = await client.send("conn-1", b"test")
-    assert response.payload == b'{"result": "ok"}'
-```
-
 ## Requirements
 
 - Python 3.11+

@@ -21,14 +21,14 @@ from bytegate.models import GatewayEnvelope, GatewayResponse
 class TestGatewayModels:
     """Tests for gateway message models with bytes payloads."""
 
-    def test_envelope_generates_request_id(self):
+    def test_envelope_generates_request_id(self) -> None:
         """Envelope should auto-generate a request_id if not provided."""
         envelope = GatewayEnvelope(connection_id="conn-1", payload=b'{"test": true}')
 
         assert envelope.request_id is not None
         assert len(envelope.request_id) == 32  # UUID hex
 
-    def test_envelope_with_explicit_request_id(self):
+    def test_envelope_with_explicit_request_id(self) -> None:
         """Envelope should use provided request_id."""
         envelope = GatewayEnvelope(
             request_id="custom-id",
@@ -38,14 +38,14 @@ class TestGatewayModels:
 
         assert envelope.request_id == "custom-id"
 
-    def test_envelope_payload_is_bytes(self):
+    def test_envelope_payload_is_bytes(self) -> None:
         """Envelope payload should be bytes."""
         envelope = GatewayEnvelope(connection_id="conn-1", payload=b"\x00\x01\x02\x03")
 
         assert isinstance(envelope.payload, bytes)
         assert envelope.payload == b"\x00\x01\x02\x03"
 
-    def test_envelope_serialization_roundtrip(self):
+    def test_envelope_serialization_roundtrip(self) -> None:
         """Envelope should survive JSON serialization roundtrip with bytes."""
         original = GatewayEnvelope(
             request_id="req-123",
@@ -60,7 +60,7 @@ class TestGatewayModels:
         assert parsed.connection_id == "conn-1"
         assert parsed.payload == b'{"method": "ping"}'
 
-    def test_envelope_binary_payload_roundtrip(self):
+    def test_envelope_binary_payload_roundtrip(self) -> None:
         """Envelope should handle binary payloads through JSON serialization."""
         # Binary data that would break naive string handling
         binary_data = bytes(range(256))
@@ -71,7 +71,7 @@ class TestGatewayModels:
 
         assert parsed.payload == binary_data
 
-    def test_response_with_error(self):
+    def test_response_with_error(self) -> None:
         """Response should support optional error field."""
         response = GatewayResponse(
             request_id="req-123",
@@ -81,7 +81,7 @@ class TestGatewayModels:
 
         assert response.error == "Connection timeout"
 
-    def test_response_without_error(self):
+    def test_response_without_error(self) -> None:
         """Response error should default to None."""
         response = GatewayResponse(
             request_id="req-123",
@@ -90,7 +90,7 @@ class TestGatewayModels:
 
         assert response.error is None
 
-    def test_response_payload_is_bytes(self):
+    def test_response_payload_is_bytes(self) -> None:
         """Response payload should be bytes."""
         response = GatewayResponse(
             request_id="req-123",
@@ -100,7 +100,7 @@ class TestGatewayModels:
         assert isinstance(response.payload, bytes)
         assert response.payload == b"\xff\xfe\xfd"
 
-    def test_response_serialization_roundtrip(self):
+    def test_response_serialization_roundtrip(self) -> None:
         """Response should survive JSON serialization roundtrip."""
         original = GatewayResponse(
             request_id="abc123",
@@ -119,7 +119,7 @@ class TestGatewayModels:
 class TestGatewayErrors:
     """Tests for gateway error types."""
 
-    def test_connection_not_found_error(self):
+    def test_connection_not_found_error(self) -> None:
         """ConnectionNotFound should contain connection_id."""
         error = ConnectionNotFound("my-connection")
 
@@ -127,7 +127,7 @@ class TestGatewayErrors:
         assert "my-connection" in str(error)
         assert isinstance(error, BytegateError)
 
-    def test_gateway_timeout_error(self):
+    def test_gateway_timeout_error(self) -> None:
         """GatewayTimeout should contain connection_id and timeout."""
         error = GatewayTimeout("my-connection", 30.0)
 
@@ -136,7 +136,7 @@ class TestGatewayErrors:
         assert "30" in str(error)
         assert isinstance(error, BytegateError)
 
-    def test_bytegate_error_is_base(self):
+    def test_bytegate_error_is_base(self) -> None:
         """BytegateError should be catchable for all gateway errors."""
         errors = [
             ConnectionNotFound("conn"),
@@ -151,7 +151,7 @@ class TestGatewayClient:
     """Tests for the gateway client."""
 
     @pytest.fixture
-    def mock_redis(self):
+    def mock_redis(self) -> AsyncMock:
         """Create a mock Redis client."""
         redis = AsyncMock()
         redis.hexists = AsyncMock(return_value=True)
@@ -160,11 +160,13 @@ class TestGatewayClient:
         return redis
 
     @pytest.fixture
-    def client(self, mock_redis):
+    def client(self, mock_redis: AsyncMock) -> GatewayClient:
         """Create a gateway client with mock Redis."""
         return GatewayClient(mock_redis)
 
-    async def test_is_connected_returns_true(self, client, mock_redis):
+    async def test_is_connected_returns_true(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """is_connected should return True when connection exists."""
         mock_redis.hexists.return_value = True
 
@@ -173,7 +175,9 @@ class TestGatewayClient:
         assert result is True
         mock_redis.hexists.assert_called_once_with(CONNECTIONS_KEY, "conn-1")
 
-    async def test_is_connected_returns_false(self, client, mock_redis):
+    async def test_is_connected_returns_false(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """is_connected should return False when connection doesn't exist."""
         mock_redis.hexists.return_value = False
 
@@ -181,7 +185,9 @@ class TestGatewayClient:
 
         assert result is False
 
-    async def test_send_raises_connection_not_found(self, client, mock_redis):
+    async def test_send_raises_connection_not_found(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send should raise ConnectionNotFound if not connected."""
         mock_redis.hexists.return_value = False
 
@@ -190,7 +196,9 @@ class TestGatewayClient:
 
         assert exc_info.value.connection_id == "conn-1"
 
-    async def test_send_publishes_to_redis(self, client, mock_redis):
+    async def test_send_publishes_to_redis(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send should publish envelope to Redis channel."""
         mock_redis.hexists.return_value = True
         mock_redis.blpop.return_value = (
@@ -205,7 +213,9 @@ class TestGatewayClient:
         channel = call_args[0][0]
         assert channel == REQUEST_CHANNEL_PATTERN.format(connection_id="conn-1")
 
-    async def test_send_waits_for_response(self, client, mock_redis):
+    async def test_send_waits_for_response(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send should wait for response via blpop."""
         mock_redis.hexists.return_value = True
 
@@ -221,7 +231,7 @@ class TestGatewayClient:
         assert response.payload == b'{"result": "success"}'
         mock_redis.blpop.assert_called_once()
 
-    async def test_send_raises_timeout(self, client, mock_redis):
+    async def test_send_raises_timeout(self, client: GatewayClient, mock_redis: AsyncMock) -> None:
         """send should raise GatewayTimeout if blpop returns None."""
         mock_redis.hexists.return_value = True
         mock_redis.blpop.return_value = None
@@ -232,7 +242,9 @@ class TestGatewayClient:
         assert exc_info.value.connection_id == "conn-1"
         assert exc_info.value.timeout == 5.0
 
-    async def test_send_uses_default_timeout(self, client, mock_redis):
+    async def test_send_uses_default_timeout(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send should use default timeout if not specified."""
         mock_redis.hexists.return_value = True
         mock_redis.blpop.return_value = (
@@ -245,7 +257,9 @@ class TestGatewayClient:
         call_args = mock_redis.blpop.call_args
         assert call_args[1]["timeout"] == DEFAULT_TIMEOUT_SECONDS
 
-    async def test_send_with_bytes_payload(self, client, mock_redis):
+    async def test_send_with_bytes_payload(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send should properly handle bytes payload."""
         mock_redis.hexists.return_value = True
         mock_redis.blpop.return_value = (
@@ -263,7 +277,9 @@ class TestGatewayClient:
         assert isinstance(response.payload, bytes)
         assert response.payload == b"\x00\x01\x02"
 
-    async def test_send_no_wait_returns_request_id(self, client, mock_redis):
+    async def test_send_no_wait_returns_request_id(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send_no_wait should return the request_id."""
         mock_redis.hexists.return_value = True
 
@@ -272,14 +288,18 @@ class TestGatewayClient:
         assert request_id is not None
         assert len(request_id) == 32
 
-    async def test_send_no_wait_raises_connection_not_found(self, client, mock_redis):
+    async def test_send_no_wait_raises_connection_not_found(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send_no_wait should raise ConnectionNotFound if not connected."""
         mock_redis.hexists.return_value = False
 
         with pytest.raises(ConnectionNotFound):
             await client.send_no_wait("conn-1", b'{"method": "fire"}')
 
-    async def test_send_no_wait_with_bytes(self, client, mock_redis):
+    async def test_send_no_wait_with_bytes(
+        self, client: GatewayClient, mock_redis: AsyncMock
+    ) -> None:
         """send_no_wait should handle bytes payload."""
         mock_redis.hexists.return_value = True
 
@@ -292,7 +312,7 @@ class TestGatewayClient:
 class TestBytesPayloadHandling:
     """Tests specifically for bytes payload handling."""
 
-    def test_envelope_empty_bytes(self):
+    def test_envelope_empty_bytes(self) -> None:
         """Envelope should handle empty bytes."""
         envelope = GatewayEnvelope(connection_id="conn", payload=b"")
 
@@ -301,7 +321,7 @@ class TestBytesPayloadHandling:
 
         assert parsed.payload == b""
 
-    def test_envelope_large_binary(self):
+    def test_envelope_large_binary(self) -> None:
         """Envelope should handle large binary payloads."""
         # 1MB of random-ish bytes
         large_payload = bytes(i % 256 for i in range(1024 * 1024))
@@ -312,7 +332,7 @@ class TestBytesPayloadHandling:
 
         assert parsed.payload == large_payload
 
-    def test_envelope_null_bytes(self):
+    def test_envelope_null_bytes(self) -> None:
         """Envelope should handle payloads with null bytes."""
         payload = b"hello\x00world\x00test"
         envelope = GatewayEnvelope(connection_id="conn", payload=payload)
@@ -322,7 +342,7 @@ class TestBytesPayloadHandling:
 
         assert parsed.payload == payload
 
-    def test_response_empty_bytes(self):
+    def test_response_empty_bytes(self) -> None:
         """Response should handle empty bytes."""
         response = GatewayResponse(request_id="123", payload=b"")
 
@@ -331,7 +351,7 @@ class TestBytesPayloadHandling:
 
         assert parsed.payload == b""
 
-    def test_payload_accepts_bytes_directly(self):
+    def test_payload_accepts_bytes_directly(self) -> None:
         """Payload field should accept bytes without conversion."""
         data = b"\x89PNG\r\n\x1a\n"  # PNG header
         envelope = GatewayEnvelope(connection_id="conn", payload=data)
@@ -344,7 +364,7 @@ class TestGatewayIntegration:
     """Integration-style tests for gateway components."""
 
     @pytest.fixture
-    def mock_redis_with_pubsub(self):
+    def mock_redis_with_pubsub(self) -> tuple[AsyncMock, AsyncMock]:
         """Create a mock Redis with pub/sub support for integration tests."""
         redis = AsyncMock()
         redis.hexists = AsyncMock(return_value=True)
@@ -363,7 +383,7 @@ class TestGatewayIntegration:
 
         return redis, pubsub
 
-    async def test_envelope_roundtrip(self):
+    async def test_envelope_roundtrip(self) -> None:
         """Envelope should survive JSON serialization roundtrip."""
         original = GatewayEnvelope(
             connection_id="test-conn",
@@ -377,7 +397,7 @@ class TestGatewayIntegration:
         assert restored.payload == original.payload
         assert restored.request_id == original.request_id
 
-    async def test_response_roundtrip(self):
+    async def test_response_roundtrip(self) -> None:
         """Response should survive JSON serialization roundtrip."""
         original = GatewayResponse(
             request_id="abc123",
@@ -392,7 +412,7 @@ class TestGatewayIntegration:
         assert restored.payload == original.payload
         assert restored.error == original.error
 
-    async def test_binary_protobuf_like_payload(self):
+    async def test_binary_protobuf_like_payload(self) -> None:
         """Gateway should handle binary payloads similar to protobuf."""
         # Simulate a protobuf-like binary payload
         proto_like = b"\x08\x96\x01\x12\x07testing\x1a\x05hello"
@@ -403,7 +423,7 @@ class TestGatewayIntegration:
 
         assert restored.payload == proto_like
 
-    async def test_msgpack_like_payload(self):
+    async def test_msgpack_like_payload(self) -> None:
         """Gateway should handle binary payloads similar to msgpack."""
         # Simulate msgpack-like binary
         msgpack_like = b"\x82\xa4name\xa4test\xa5value\xcb@\t!\xfbTD-\x18"
